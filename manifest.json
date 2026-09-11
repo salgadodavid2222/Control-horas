@@ -1,0 +1,17 @@
+{
+  "name": "Control de Horas",
+  "short_name": "Horas",
+  "description": "Registro y cálculo de horas nocturnas, extra y festivos, con informes en PDF.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#EEF3FB",
+  "theme_color": "#0B2E6B",
+  "lang": "es",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
