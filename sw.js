@@ -1,4 +1,4 @@
-const CACHE_NAME = 'control-horas-v1';
+const CACHE_NAME = 'control-horas-v2';
 const CORE_FILES = ['./index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
