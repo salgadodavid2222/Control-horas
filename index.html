@@ -381,8 +381,13 @@ let REPORT_MONTH = 'Enero';
 function getMonthData(year, monthName){
   const y = String(year);
   if(!STATE.monthsByYear[y]) STATE.monthsByYear[y] = {};
-  if(!STATE.monthsByYear[y][monthName]) STATE.monthsByYear[y][monthName] = {vacaciones:{desde:'',hasta:''}, ausencias:[], days:{}};
+  if(!STATE.monthsByYear[y][monthName]) STATE.monthsByYear[y][monthName] = {vacaciones:{desde:'',hasta:''}, ausencias:[], days:{}, abonado:0};
+  if(STATE.monthsByYear[y][monthName].abonado===undefined) STATE.monthsByYear[y][monthName].abonado = 0;
   return STATE.monthsByYear[y][monthName];
+}
+function nextMonthName(monthName){
+  const idx = MONTH_NAMES.indexOf(monthName);
+  return MONTH_NAMES[(idx+1)%12];
 }
 
 /* ============ PERSISTENCIA ============ */
@@ -510,17 +515,33 @@ function calcRow(iso, turno, monthData, cfg){
     ( (inRange(iso,vac.desde,vac.hasta) && isWeekday(iso)) || !!ausencia );
 
   if(isSpecialDay){
-    return {G:cfg.jornadaNormal, H:0, I:cfg.jornadaNormal, J:0, special:true, ausenciaDesc: ausencia?ausencia.desc:null};
+    return {G:cfg.jornadaNormal, H:0, special:true, ausenciaDesc: ausencia?ausencia.desc:null};
   }
   if(entradaT===null || salidaT===null){
-    return {G:null,H:null,I:null,J:null,special:false};
+    return {G:null,H:null,special:false};
   }
   const F = salidaT < entradaT ? salidaT+24 : salidaT;
   const G = F - entradaT;
   const H = nightHours(entradaT,F,cfg);
+  return {G,H,special:false};
+}
+/* Horas normales/extra calculadas a nivel de DÍA (sumando turno Mañana + Tarde),
+   no por turno por separado: así un día partido en dos turnos no "reinicia" el
+   umbral de horas extra en cada turno. */
+function calcDay(iso, monthData, cfg){
+  const rM = calcRow(iso,'M',monthData,cfg);
+  const rT = calcRow(iso,'T',monthData,cfg);
+  if(rM.special){
+    return {G:rM.G, H:0, I:rM.G, J:0, special:true, ausenciaDesc:rM.ausenciaDesc, rM, rT};
+  }
+  if(rM.G===null && rT.G===null){
+    return {G:null,H:null,I:null,J:null,special:false,rM,rT};
+  }
+  const G = (rM.G||0)+(rT.G||0);
+  const H = (rM.H||0)+(rT.H||0);
   const I = Math.min(G, cfg.umbralExtra);
-  const J = Math.max(0, G - cfg.umbralExtra);
-  return {G,H,I,J,special:false};
+  const J = Math.max(0, G-cfg.umbralExtra);
+  return {G,H,I,J,special:false,rM,rT};
 }
 function calcMonth(year, monthName){
   const meta = getMonthsMeta(year).find(m=>m.name===monthName);
@@ -530,10 +551,8 @@ function calcMonth(year, monthName){
   const FESTIVOS = getFestivos(year).list;
   let totG=0,totH=0,totI=0,totJ=0;
   days.forEach(iso=>{
-    ['M','T'].forEach(turno=>{
-      const r = calcRow(iso,turno,monthData,cfg);
-      if(r.G!==null){ totG+=r.G; totH+=r.H; totI+=r.I; totJ+=r.J; }
-    });
+    const d = calcDay(iso,monthData,cfg);
+    if(d.G!==null){ totG+=d.G; totH+=d.H; totI+=d.I; totJ+=d.J; }
   });
   const festivosMes = FESTIVOS.filter(f=>days.includes(f));
   let festivosTrabajados = 0;
@@ -547,10 +566,14 @@ function calcMonth(year, monthName){
   const importeFestivos = festivosTrabajados*cfg.precioFestivo;
   const descuentoObjetivo = cfg.fpnBase*0.7;
   const descontado = Math.min(descuentoObjetivo, totalAPercibir);
-  const sobrante = Math.max(totalAPercibir-descuentoObjetivo,0);
+  const totalAPercibirFPN = Math.max(totalAPercibir-descuentoObjetivo,0);
+  const abonado = monthData.abonado||0;
+  const diferencia = totalAPercibirFPN - abonado;
   return {
     days, totG,totH,totI,totJ, festivosMes, festivosTrabajados, importeExtra, importeNocturna,
-    totalAPercibir, importeFestivos, descuentoObjetivo, descontado, sobrante, ref: meta.weeks===6?240:160
+    totalAPercibir, importeFestivos, descuentoObjetivo, descontado,
+    sobrante: totalAPercibirFPN, totalAPercibirFPN, abonado, diferencia,
+    ref: meta.weeks===6?240:160
   };
 }
 
@@ -776,24 +799,27 @@ function renderDetalleDiario(monthName){
     let weekTotal = 0;
     let weekRows = '';
     weekDays.forEach(iso=>{
-      ['M','T'].forEach(turno=>{
-        const r = calcRow(iso,turno,monthData,cfg);
-        if(r.G!==null) weekTotal += r.G;
-        if(r.G===null) return; // sin registro en este turno, no ocupa sitio
-        const isFest = FESTIVOS.includes(iso);
-        weekRows += `<div class="detail-row">
-          <div class="detail-head">${fmtDate(iso)} · ${turno==='M'?'Mañana':'Tarde'}
-            ${isFest?`<span class="tag festivo">${FESTIVOS_DATA.names[iso]||'Festivo'}</span>`:''}
-            ${r.special?`<span class="tag special">${r.ausenciaDesc?'Ausencia':'Vacaciones'}</span>`:''}
-          </div>
-          <div class="detail-chips">
-            <span class="stat-chip"><span class="k">Total</span><span class="v">${fmtH(r.G)}</span></span>
-            <span class="stat-chip night"><span class="k">Nocturnas</span><span class="v">${fmtH(r.H)}</span></span>
-            <span class="stat-chip"><span class="k">Normales</span><span class="v">${fmtH(r.I)}</span></span>
-            <span class="stat-chip extra"><span class="k">Extra</span><span class="v">${fmtH(r.J)}</span></span>
-          </div>
-        </div>`;
-      });
+      const d = calcDay(iso,monthData,cfg);
+      if(d.G===null) return; // sin registro ese día, no ocupa sitio
+      weekTotal += d.G;
+      const isFest = FESTIVOS.includes(iso);
+      const turnoChips = d.special ? '' : [
+        (d.rM && d.rM.G!==null) ? `<span class="stat-chip"><span class="k">Mañana</span><span class="v">${fmtH(d.rM.G)}</span></span>` : '',
+        (d.rT && d.rT.G!==null) ? `<span class="stat-chip"><span class="k">Tarde</span><span class="v">${fmtH(d.rT.G)}</span></span>` : ''
+      ].join('');
+      weekRows += `<div class="detail-row">
+        <div class="detail-head">${fmtDate(iso)}
+          ${isFest?`<span class="tag festivo">${FESTIVOS_DATA.names[iso]||'Festivo'}</span>`:''}
+          ${d.special?`<span class="tag special">${d.ausenciaDesc?'Ausencia':'Vacaciones'}</span>`:''}
+        </div>
+        <div class="detail-chips">
+          ${turnoChips}
+          <span class="stat-chip"><span class="k">Total día</span><span class="v">${fmtH(d.G)}</span></span>
+          <span class="stat-chip night"><span class="k">Nocturnas</span><span class="v">${fmtH(d.H)}</span></span>
+          <span class="stat-chip"><span class="k">Normales</span><span class="v">${fmtH(d.I)}</span></span>
+          <span class="stat-chip extra"><span class="k">Extra</span><span class="v">${fmtH(d.J)}</span></span>
+        </div>
+      </div>`;
     });
     const diff = weekTotal-40;
     rowsHtml += `<div class="week-label">Semana ${weekNum} <span style="font-weight:500;color:var(--ink-soft);text-transform:none;">— ${weekTotal.toFixed(2).replace('.',',')} h (${diff>=0?'+':''}${diff.toFixed(2).replace('.',',')} h vs 40h)</span></div>`;
@@ -837,6 +863,8 @@ function renderCalculos(){
       <span class="status ${worked?'trabajado':'libre'}">${worked?'Trabajado':'No trabajado'}</span></div>`;
   }).join('') || `<p class="hint">Sin festivos en este mes.</p>`;
 
+  const nextM = nextMonthName(monthName);
+  const diffPositive = calc.diferencia>=0;
   const moneyCard = el(`<div class="card">
     <h3>Cálculo de importes — ${monthName}</h3>
     <div class="money-grid">
@@ -852,8 +880,15 @@ function renderCalculos(){
         </table>
         <div class="fpn-result">
           <div class="fpn-box desc"><span>Descontado</span><b>${fmtEUR(calc.descontado)}</b></div>
-          <div class="fpn-box sobra"><span>Sobrante</span><b>${fmtEUR(calc.sobrante)}</b></div>
+          <div class="fpn-box sobra"><span>Total a percibir -FPN</span><b>${fmtEUR(calc.totalAPercibirFPN)}</b></div>
         </div>
+        <h3 style="margin-top:14px;">Horas abonadas nómina mes vencido <span style="font-weight:400;color:var(--ink-soft);">(nómina de ${nextM})</span></h3>
+        <div class="field"><label>Importe abonado (€)</label><input id="calc-abonado" type="number" step="0.01" value="${calc.abonado}"></div>
+        <div class="fpn-result">
+          <div class="fpn-box desc"><span>Total a percibir -FPN</span><b>${fmtEUR(calc.totalAPercibirFPN)}</b></div>
+          <div class="fpn-box sobra"><span>Diferencia</span><b style="color:${diffPositive?'var(--blue-900)':'#B91C1C'};">${fmtEUR(calc.diferencia)}</b></div>
+        </div>
+        <p class="hint">Importe realmente abonado en la nómina de ${nextM} por las horas de ${monthName}. La diferencia (Total a percibir -FPN menos lo abonado) se calcula sola y también aparece en el resumen anual.</p>
       </div>
       <div>
         <h3>Festivos del mes <span style="font-weight:400;color:var(--ink-soft);">— ${calc.festivosTrabajados} trabajado(s) · ${fmtEUR(calc.importeFestivos)}</span></h3>
@@ -863,6 +898,17 @@ function renderCalculos(){
   </div>`);
   wrap.appendChild(moneyCard);
 
+  setTimeout(()=>{
+    const abonadoInput = document.getElementById('calc-abonado');
+    if(abonadoInput){
+      abonadoInput.addEventListener('change', e=>{
+        monthData.abonado = parseFloat(e.target.value)||0;
+        queueSave();
+        renderContent();
+      });
+    }
+  },0);
+
   return wrap;
 }
 
@@ -870,10 +916,13 @@ function renderResumen(){
   const cfg = STATE.config;
   const wrap = document.createElement('div');
   let sumNormales=0,sumNocturnas=0,sumExtra=0,sumTotales=0;
+  let sumFPN=0,sumAbonado=0,sumDiferencia=0;
   const rows = getMonthsMeta(STATE.year).map(m=>{
     const c = calcMonth(STATE.year, m.name);
     sumNormales += c.totI; sumNocturnas += c.totH; sumExtra += c.totJ; sumTotales += (c.totI+c.totJ);
-    return {name:m.name, normales:c.totI, nocturnas:c.totH, extra:c.totJ, totales:c.totI+c.totJ, ref:c.ref};
+    sumFPN += c.totalAPercibirFPN; sumAbonado += c.abonado; sumDiferencia += c.diferencia;
+    return {name:m.name, normales:c.totI, nocturnas:c.totH, extra:c.totJ, totales:c.totI+c.totJ, ref:c.ref,
+      fpn:c.totalAPercibirFPN, abonado:c.abonado, diferencia:c.diferencia};
   });
 
   wrap.appendChild(el(`<div class="stat-grid cols-4">
@@ -906,6 +955,43 @@ function renderResumen(){
     </div>
   </div>`);
   wrap.appendChild(tableCard);
+
+  wrap.appendChild(el(`<div class="stat-grid">
+     <div class="stat-card"><div class="stat-label">Total a percibir -FPN (año)</div><div class="stat-value">${fmtEUR(sumFPN)}</div></div>
+     <div class="stat-card"><div class="stat-label">Horas abonadas nómina (año)</div><div class="stat-value">${fmtEUR(sumAbonado)}</div></div>
+  </div>`));
+
+  const diffRowsHtml = rows.map((r,idx)=>`<tr>
+    <td>${r.name}</td>
+    <td>${fmtEUR(r.fpn)}</td>
+    <td><input type="number" step="0.01" class="resumen-abonado-input" data-month="${r.name}" value="${r.abonado}" style="width:90px;text-align:right;padding:4px 6px;font-size:.8rem;"></td>
+    <td style="color:${r.diferencia>=0?'inherit':'#B91C1C'};">${fmtEUR(r.diferencia)}</td>
+  </tr>`).join('');
+  const diffCard = el(`<div class="card">
+    <h3>Diferencia mensual: Total a percibir -FPN vs Horas abonadas</h3>
+    <div class="table-wrap">
+      <table class="resumen">
+        <thead><tr><th>Mes</th><th>Total a percibir -FPN (€)</th><th>Horas abonadas nómina (€)</th><th>Diferencia (€)</th></tr></thead>
+        <tbody>
+          ${diffRowsHtml}
+          <tr class="total-row"><td>TOTAL</td><td>${fmtEUR(sumFPN)}</td><td>${fmtEUR(sumAbonado)}</td><td style="color:${sumDiferencia>=0?'inherit':'#B91C1C'};">${fmtEUR(sumDiferencia)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint">Puedes editar aquí mismo el importe abonado de cualquier mes; se guarda al momento y también se refleja en la pestaña Cálculos de ese mes y en los PDF.</p>
+  </div>`);
+  wrap.appendChild(diffCard);
+
+  setTimeout(()=>{
+    diffCard.querySelectorAll('.resumen-abonado-input').forEach(inp=>{
+      inp.addEventListener('change', e=>{
+        const monthData = getMonthData(STATE.year, e.target.dataset.month);
+        monthData.abonado = parseFloat(e.target.value)||0;
+        queueSave();
+        renderContent();
+      });
+    });
+  },0);
 
   const maxRef = Math.max(...rows.map(r=>r.ref));
   const chartRows = rows.map(r=>{
@@ -1003,44 +1089,58 @@ function generatePDF(scope){
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF();
   const cfg = STATE.config;
-  let y = 16;
+  let y = 14;
 
-  doc.setFont('helvetica','bold'); doc.setFontSize(15);
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
   doc.setTextColor(11,46,107);
-  doc.text('Control de Horas '+STATE.year, 14, y); y+=7;
-  doc.setFontSize(10); doc.setFont('helvetica','normal'); doc.setTextColor(60,70,90);
-  doc.text(`${STATE.employee.nombre||'—'}   ·   DNI: ${STATE.employee.dni||'—'}`, 14, y); y+=5;
-  doc.text(`${STATE.employee.empresa||'—'}   ·   CIF: ${STATE.employee.cif||'—'}`, 14, y); y+=9;
+  doc.text('Control de Horas '+STATE.year, 14, y); y+=5.5;
+  doc.setFontSize(8.5); doc.setFont('helvetica','normal'); doc.setTextColor(60,70,90);
+  doc.text(`${STATE.employee.nombre||'—'}   ·   DNI: ${STATE.employee.dni||'—'}   ·   ${STATE.employee.empresa||'—'}   ·   CIF: ${STATE.employee.cif||'—'}`, 14, y); y+=6;
+
+  const tableOpts = {
+    styles:{fontSize:7, textColor:[15,27,51], cellPadding:1.3, lineColor:[220,230,245], lineWidth:0.1},
+    headStyles:{fillColor:[11,46,107], textColor:255, fontSize:7, cellPadding:1.5},
+    alternateRowStyles:{fillColor:[240,246,255]},
+    margin:{left:14, right:14}
+  };
 
   if(scope==='ANUAL'){
-    doc.setFontSize(12); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
-    doc.text('Informe anual de horas', 14, y); y+=6;
+    doc.setFontSize(10.5); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
+    doc.text('Informe anual de horas', 14, y); y+=4.5;
 
-    let sumNormales=0,sumNocturnas=0,sumExtra=0,sumTotales=0,sumImporte=0,sumDescontado=0,sumSobrante=0;
-    const body = getMonthsMeta(STATE.year).map(m=>{
-      const c = calcMonth(STATE.year, m.name);
+    let sumNormales=0,sumNocturnas=0,sumExtra=0,sumTotales=0,sumImporte=0,sumDescontado=0,sumFPN=0,sumAbonado=0,sumDiferencia=0;
+    const monthCalcs = getMonthsMeta(STATE.year).map(m=>({name:m.name, c:calcMonth(STATE.year, m.name)}));
+    const body = monthCalcs.map(({name,c})=>{
       sumNormales+=c.totI; sumNocturnas+=c.totH; sumExtra+=c.totJ; sumTotales+=(c.totI+c.totJ);
-      sumImporte+=c.totalAPercibir; sumDescontado+=c.descontado; sumSobrante+=c.sobrante;
-      return [m.name, c.totI.toFixed(2), c.totH.toFixed(2), c.totJ.toFixed(2), (c.totI+c.totJ).toFixed(2), c.totalAPercibir.toFixed(2)+' €'];
+      sumImporte+=c.totalAPercibir; sumDescontado+=c.descontado;
+      sumFPN+=c.totalAPercibirFPN; sumAbonado+=c.abonado; sumDiferencia+=c.diferencia;
+      return [name, c.totI.toFixed(2), c.totH.toFixed(2), c.totJ.toFixed(2), (c.totI+c.totJ).toFixed(2), c.totalAPercibir.toFixed(2)+' €'];
     });
     body.push(['TOTAL', sumNormales.toFixed(2), sumNocturnas.toFixed(2), sumExtra.toFixed(2), sumTotales.toFixed(2), sumImporte.toFixed(2)+' €']);
 
-    doc.autoTable({
+    doc.autoTable(Object.assign({}, tableOpts, {
       startY:y,
-      head:[['Mes','Normales (h)','Nocturnas (h)','Extra (h)','Total (h)','Importe']],
-      body, styles:{fontSize:8, textColor:[15,27,51]}, headStyles:{fillColor:[11,46,107], textColor:255},
-      alternateRowStyles:{fillColor:[240,246,255]}
-    });
-    y = doc.lastAutoTable.finalY + 10;
+      head:[['Mes','Normales (h)','Nocturnas (h)','Extra (h)','Total (h)','Importe']]
+      , body
+    }));
+    y = doc.lastAutoTable.finalY + 5;
 
-    doc.setFontSize(11); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
-    doc.text('Totales anuales', 14, y); y+=6;
-    doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(40,48,66);
-    doc.text(`Horas trabajadas: ${sumTotales.toFixed(2)} h  (${((sumTotales/cfg.limiteAnual)*100).toFixed(1)}% del límite de ${cfg.limiteAnual} h)`, 14, y); y+=5.5;
-    doc.text(`Horas extra: ${sumExtra.toFixed(2)} h  (${((sumExtra/cfg.limiteExtraAnual)*100).toFixed(1)}% del límite de ${cfg.limiteExtraAnual} h)`, 14, y); y+=5.5;
-    doc.text(`Horas nocturnas: ${sumNocturnas.toFixed(2)} h`, 14, y); y+=5.5;
-    doc.text(`Importe total estimado (extra + nocturnas): ${sumImporte.toFixed(2)} €`, 14, y); y+=5.5;
-    doc.text(`Total descontado FPN: ${sumDescontado.toFixed(2)} €   ·   Total sobrante: ${sumSobrante.toFixed(2)} €`, 14, y);
+    doc.setFontSize(9.5); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
+    doc.text('Totales anuales', 14, y); y+=4.5;
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(40,48,66);
+    doc.text(`Horas trabajadas: ${sumTotales.toFixed(2)} h  (${((sumTotales/cfg.limiteAnual)*100).toFixed(1)}% del límite de ${cfg.limiteAnual} h)   ·   Horas extra: ${sumExtra.toFixed(2)} h  (${((sumExtra/cfg.limiteExtraAnual)*100).toFixed(1)}% de ${cfg.limiteExtraAnual} h)`, 14, y); y+=4;
+    doc.text(`Horas nocturnas: ${sumNocturnas.toFixed(2)} h   ·   Importe estimado (extra + nocturnas): ${sumImporte.toFixed(2)} €`, 14, y); y+=4;
+    doc.text(`Total descontado FPN: ${sumDescontado.toFixed(2)} €   ·   Total a percibir -FPN: ${sumFPN.toFixed(2)} €`, 14, y); y+=6;
+
+    doc.setFontSize(9.5); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
+    doc.text('Diferencia mensual: Total a percibir -FPN vs Horas abonadas', 14, y); y+=4.5;
+    const diffBody = monthCalcs.map(({name,c})=>[name, c.totalAPercibirFPN.toFixed(2)+' €', c.abonado.toFixed(2)+' €', c.diferencia.toFixed(2)+' €']);
+    diffBody.push(['TOTAL', sumFPN.toFixed(2)+' €', sumAbonado.toFixed(2)+' €', sumDiferencia.toFixed(2)+' €']);
+    doc.autoTable(Object.assign({}, tableOpts, {
+      startY:y,
+      head:[['Mes','Total a percibir -FPN','Horas abonadas nómina','Diferencia']]
+      , body:diffBody
+    }));
 
     deliverPDF(doc, `Informe_Anual_${STATE.year}.pdf`);
     return;
@@ -1051,38 +1151,41 @@ function generatePDF(scope){
   const monthData = getMonthData(STATE.year, monthName);
   const days = genDays(meta);
 
-  doc.setFontSize(12); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
-  doc.text(`Informe mensual — ${monthName} ${STATE.year}`, 14, y); y+=6;
+  doc.setFontSize(10.5); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
+  doc.text(`Informe mensual — ${monthName} ${STATE.year}`, 14, y); y+=4.5;
 
   const body = [];
   days.forEach(iso=>{
-    ['M','T'].forEach(turno=>{
-      const r = calcRow(iso,turno,monthData,cfg);
-      const cell = (monthData.days[iso]||{})[turno]||{};
-      body.push([
-        fmtDate(iso), turno==='M'?'Mañana':'Tarde', cell.entrada||'—', cell.salida||'—',
-        r.G!==null?r.G.toFixed(2):'—', r.H!==null?r.H.toFixed(2):'—', r.I!==null?r.I.toFixed(2):'—', r.J!==null?r.J.toFixed(2):'—'
-      ]);
-    });
+    const d = calcDay(iso,monthData,cfg);
+    if(d.G===null) return;
+    const cellM = (monthData.days[iso]||{}).M||{};
+    const cellT = (monthData.days[iso]||{}).T||{};
+    body.push([
+      fmtDate(iso),
+      d.special ? '—' : (cellM.entrada||'—')+'–'+(cellM.salida||'—'),
+      d.special ? '—' : (cellT.entrada||'—')+'–'+(cellT.salida||'—'),
+      d.G.toFixed(2), d.H.toFixed(2), d.I.toFixed(2), d.J.toFixed(2)
+    ]);
   });
-  doc.autoTable({
+  doc.autoTable(Object.assign({}, tableOpts, {
     startY:y,
-    head:[['Fecha','Turno','Entrada','Salida','Total (h)','Noct. (h)','Normal (h)','Extra (h)']],
-    body, styles:{fontSize:7, textColor:[15,27,51]}, headStyles:{fillColor:[11,46,107], textColor:255},
-    alternateRowStyles:{fillColor:[240,246,255]}
-  });
-  y = doc.lastAutoTable.finalY + 10;
+    head:[['Fecha','Mañana','Tarde','Total (h)','Noct. (h)','Normal (h)','Extra (h)']]
+    , body
+  }));
+  y = doc.lastAutoTable.finalY + 5;
 
   const c = calcMonth(STATE.year, monthName);
-  if(y>260){ doc.addPage(); y=16; }
-  doc.setFontSize(11); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
-  doc.text('Cálculo de importes', 14, y); y+=6;
-  doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(40,48,66);
-  doc.text(`Horas extra: ${c.totJ.toFixed(2)} h  →  ${c.importeExtra.toFixed(2)} €`, 14, y); y+=5.5;
-  doc.text(`Horas nocturnas: ${c.totH.toFixed(2)} h  →  ${c.importeNocturna.toFixed(2)} €`, 14, y); y+=5.5;
-  doc.text(`Total a percibir: ${c.totalAPercibir.toFixed(2)} €`, 14, y); y+=5.5;
-  doc.text(`Descuento FPN (70% de ${cfg.fpnBase.toFixed(2)} €): descontado ${c.descontado.toFixed(2)} €  ·  sobrante ${c.sobrante.toFixed(2)} €`, 14, y); y+=5.5;
-  doc.text(`Festivos trabajados: ${c.festivosTrabajados}  →  ${c.importeFestivos.toFixed(2)} €`, 14, y);
+  doc.setFontSize(9.5); doc.setFont('helvetica','bold'); doc.setTextColor(11,46,107);
+  doc.text('Cálculo de importes', 14, y); y+=4.5;
+  doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(40,48,66);
+  doc.text(`Horas extra: ${c.totJ.toFixed(2)} h → ${c.importeExtra.toFixed(2)} €   ·   Horas nocturnas: ${c.totH.toFixed(2)} h → ${c.importeNocturna.toFixed(2)} €`, 14, y); y+=4;
+  doc.text(`Total a percibir: ${c.totalAPercibir.toFixed(2)} €   ·   Descuento FPN (70% de ${cfg.fpnBase.toFixed(2)} €): ${c.descontado.toFixed(2)} €`, 14, y); y+=4;
+  doc.text(`Total a percibir -FPN: ${c.totalAPercibirFPN.toFixed(2)} €   ·   Festivos trabajados: ${c.festivosTrabajados} → ${c.importeFestivos.toFixed(2)} €`, 14, y); y+=6;
+
+  doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor(11,46,107);
+  doc.text(`Horas abonadas nómina mes vencido (nómina de ${nextMonthName(monthName)})`, 14, y); y+=4.5;
+  doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(40,48,66);
+  doc.text(`Total a percibir -FPN: ${c.totalAPercibirFPN.toFixed(2)} €   ·   Horas abonadas: ${c.abonado.toFixed(2)} €   ·   Diferencia: ${c.diferencia.toFixed(2)} €`, 14, y);
 
   deliverPDF(doc, `Informe_${monthName}_${STATE.year}.pdf`);
   }catch(e){
